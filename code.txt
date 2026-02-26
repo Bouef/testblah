@@ -1,0 +1,71 @@
+#!/usr/bin/env bash
+
+# ===== CONFIG =====
+PATH_TO_ZROK="/usr/local/bin/zrok"   # change if needed
+MINECRAFT_SERVER_IP="127.0.0.1"
+MINECRAFT_SERVER_PORT="25565"
+# ==================
+
+# ---- Check zrok path ----
+while true; do
+    if [ -f "$PATH_TO_ZROK" ]; then
+        break
+    else
+        echo "==== PATH_TO_ZROK incorrect! ===="
+        read -p "Enter the correct path: " PATH_TO_ZROK
+    fi
+done
+
+# ---- Check zrok enabled ----
+if [ ! -f "$HOME/.zrok/environment.json" ]; then
+    echo "zrok not enabled! Run 'zrok enable' first."
+    exit 1
+fi
+
+# ---- Get ziti identity ----
+zid=$(jq -r '.ziti_identity' "$HOME/.zrok/environment.json")
+
+# Strip non-alphanumeric and append minecraft
+RESERVED_SHARE=$(echo "${zid}minecraft" | tr -cd '[:alnum:]' | tr '[:upper:]' '[:lower:]')
+
+# ---- Get overview JSON ----
+overview_json=$("$PATH_TO_ZROK" overview --output json)
+
+target_exists=$(echo "$overview_json" | jq -r \
+    --arg zid "$zid" \
+    '.environments[] | select(.environment.zId==$zid) | .environment.zId' | head -n1)
+
+share_exists=$(echo "$overview_json" | jq -r \
+    --arg zid "$zid" \
+    --arg token "$RESERVED_SHARE" \
+    '.environments[] 
+     | select(.environment.zId==$zid) 
+     | .shares[]? 
+     | select(.token==$token) 
+     | .token' | head -n1)
+
+if [ -n "$share_exists" ]; then
+    echo "Found share with token $RESERVED_SHARE. No need to reserve..."
+else
+    echo "Reserving share: $RESERVED_SHARE"
+    "$PATH_TO_ZROK" reserve private \
+        "${MINECRAFT_SERVER_IP}:${MINECRAFT_SERVER_PORT}" \
+        --backend-mode tcpTunnel \
+        --unique-name "$RESERVED_SHARE"
+fi
+
+# ---- Wait for Minecraft port ----
+echo "Waiting for port $MINECRAFT_SERVER_PORT to respond..."
+
+while ! nc -z "$MINECRAFT_SERVER_IP" "$MINECRAFT_SERVER_PORT"; do
+    sleep 5
+done
+
+echo "Port $MINECRAFT_SERVER_PORT is now open. Starting zrok share"
+
+# ---- Start reserved share ----
+"$PATH_TO_ZROK" share reserved "$RESERVED_SHARE"
+
+echo ""
+echo "To stop, press Ctrl+C"
+echo ""
